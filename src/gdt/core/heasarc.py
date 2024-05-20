@@ -305,6 +305,122 @@ class FtpFinder(BaseFinder):
 
         return '<{0}: {1}>'.format(self.__class__.__name__, args)
 
+class HttpFinder(FtpFinder):
+    """ Note: HttpFinder should not inherit from FtpFinder. There should be
+    a lower level class that defines common functions between them. Something
+    like BaseInterface --> FtpFinder(BaseInterface), HttpFinder(BaseInterface).
+
+    Let's skip the additional class for prototyping. It allows us to examine
+    the fewet changes.
+    """
+    def __init__(self, *args, url='https://heasarc.gsfc.nasa.gov/FTP',
+                 start_key='<a href="', end_key='">', table_key='Parent Directory</a>',
+                 progress: Progress = None, context: ssl.SSLContext = None):
+        super(FtpFinder, self).__init__(progress)
+        self._url = url
+        # keys are used to parse the HTTP/HTTPS file index
+        self._start_key = start_key
+        self._end_key = end_key
+        self._table_key = table_key
+        self._context = context
+        self._args = None
+        self._file_list = []
+
+        if len(args) > 0:
+            if url is not None:
+                self._args = self._validate(*args)
+            else:
+                raise ValueError('*args were given while url was None')
+
+    def __del__(self):
+        pass
+
+    def ls(self, *args):
+        """List the directory contents of an HTTPS directory associated with
+        a data set by parsing the page index.
+
+        Args:
+            args: The set of parameters needed to define the data path
+
+        Returns:
+            (list of str)
+        """
+        path = self._url + self._construct_path(*args)
+        try:
+            files = []
+            page = urlopen(path, context=self._context)
+            table = page.read().decode("utf-8").split(self._table_key)[1]
+            for line in table.split("\n"):
+                if self._start_key in line:
+                    file = line.split(self._start_key)[1].split(self._end_key)[0]
+                    files.append(file)
+        except:
+            raise RuntimeError('Failed to reconnect.')
+        return sorted([os.path.basename(f) for f in files])
+
+    def _validate(self, *args):
+        """Validate arguments by constructing the FTP path and attempting to
+        change to that directory"""
+        try:
+            self._file_list = self.ls(*args)
+            return args
+        except:
+            self._file_list = []
+            raise ValueError('{} are not valid arguments'.format(args))
+
+    def get(self, download_dir: Union[str, Path], files: List[str],
+            verbose: bool = True) -> List[Path]:
+        """Downloads a list of files from the current FTP directory.
+        This function also returns a list of the downloaded file paths.
+
+        Args:
+            download_dir (str, Path): The download directory location
+            files (list of str): The list of files to download
+            verbose (bool, optional): If True, will output the download status.
+                                      Default is True.
+
+        Returns:
+            (list)
+        """
+        download_dir = Path(download_dir)
+        download_dir.mkdir(parents=True, exist_ok=True)
+
+        base_url = self._url + self._construct_path(*self._args) + "/"
+
+        # download each file
+        filepaths = []
+        for file in files:
+            file_path = download_dir.joinpath(file)
+            #print(base_url + file)
+            #exit(0)
+            response = urlopen(base_url + file, context=self._context)
+            with file_path.open('wb') as fp:
+                if verbose:
+                    total_size = int(response.headers["Content-Length"])
+                    if self._progress is None:
+                        progress = self._create_progress()
+                        progress.start()
+                    else:
+                        progress = self._progress
+
+                    task_id = progress.add_task("download", filename=file_path.name, total=total_size)
+                    while True:
+                        data = response.read(32768)
+                        if not data:
+                            break
+                        fp.write(data)
+                        progress.update(task_id, advance=len(data))
+
+                    # If this is a locally created progress, then let's stop it.
+                    if self._progress is None:
+                        progress.stop()
+                else:
+                    shutil.copyfileobj(response, fp)
+
+            filepaths.append(file_path)
+
+        return filepaths
+
 
 class Ftp(FtpFinder):
 
